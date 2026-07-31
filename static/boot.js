@@ -3712,7 +3712,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const saved=urlSession||savedLocal;
   if(saved){
     try{
-      const savedSidebarOnlyState=(!urlSession&&savedLocal)
+      const standalonePwaLaunch=!!(
+        window.HermesPWA&&
+        typeof window.HermesPWA.isStandalone==='function'&&
+        window.HermesPWA.isStandalone()
+      );
+      const savedSidebarOnlyState=(!urlSession&&savedLocal&&!standalonePwaLaunch)
         ? await _savedSessionSidebarOnlyState(savedLocal)
         : null;
       if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly){

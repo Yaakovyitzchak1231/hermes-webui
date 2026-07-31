@@ -60,6 +60,19 @@ def test_root_saved_running_session_is_checked_before_load_session_projection():
     )
 
 
+def test_standalone_pwa_restores_saved_running_session():
+    """Installed PWA relaunches should reconnect to their saved running chat."""
+    block = _boot_saved_session_block()
+    compact = block.replace(" ", "").replace("\n", "")
+    assert "window.HermesPWA.isStandalone()" in block, (
+        "boot must distinguish an installed PWA relaunch from a new browser tab"
+    )
+    assert "!urlSession&&savedLocal&&!standalonePwaLaunch" in compact, (
+        "the browser-only sidebar policy must not suppress saved-session restore "
+        "for an installed PWA"
+    )
+
+
 def test_saved_running_session_helper_uses_metadata_only_and_runtime_markers():
     """The helper should inspect metadata without loading messages or attaching SSE."""
     helper_idx = BOOT_JS.find("async function _savedSessionSidebarOnlyState")
