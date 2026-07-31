@@ -684,6 +684,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**
+- [`docs/fork-operations.md`](docs/fork-operations.md) — maintained-fork update flow, notifications, conflict recovery, rollback, and WebUI/Agent boundaries
 - [`docs/remote-access.md`](docs/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
 - [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md) — optional dynamic recall-prefill and Gateway-backed browser chat for self-hosted deployments
 - [`docs/docker.md`](docs/docker.md) — Docker compose setup, common failures, and bind-mount migration

@@ -1,5 +1,7 @@
 name: Sync upstream
 
+# Operator runbook: docs/fork-operations.md
+
 on:
   schedule:
     - cron: "17 */6 * * *"
@@ -29,12 +31,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/nesquena/hermes-webui.git
-          git fetch upstream master
+          git fetch --tags upstream master
 
           if git merge-base --is-ancestor upstream/master HEAD; then
             echo "Fork already contains the latest upstream master."
-            exit 0
+          else
+            git merge --no-edit upstream/master
           fi
 
-          git merge --no-edit upstream/master
           git push origin master
+          # Publish release tags only after the upstream merge succeeds. This
+          # keeps the WebUI's release-channel updater aligned with the source
+          # available on the fork.
+          git push --tags origin
