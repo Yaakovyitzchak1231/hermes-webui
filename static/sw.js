@@ -173,6 +173,42 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+self.addEventListener('push', (event) => {
+  event.waitUntil((async () => {
+    let payload = {};
+    try {
+      payload = event.data ? event.data.json() : {};
+    } catch (_err) {
+      payload = {body: event.data ? event.data.text() : ''};
+    }
+
+    // A visible Hermes window already renders the same event in context. Push
+    // is the background/closed-app delivery path, so suppress duplicates unless
+    // the user explicitly pressed "Send test".
+    const clientList = await self.clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true,
+    });
+    const hasVisibleClient = clientList.some(
+      (client) => client.visibilityState === 'visible'
+    );
+    if (hasVisibleClient && !payload.force) return;
+
+    const rawUrl = payload.url || './';
+    const targetUrl = new URL(rawUrl, self.registration.scope || './').href;
+    const kind = String(payload.kind || '');
+    await self.registration.showNotification(payload.title || 'Hermes', {
+      body: payload.body || 'Hermes has an update.',
+      tag: payload.tag || 'hermes-web-push',
+      renotify: true,
+      icon: 'static/favicon-192.png',
+      badge: 'static/favicon-32.png',
+      requireInteraction: kind === 'approval' || kind === 'clarify',
+      timestamp: Number(payload.timestamp || Date.now()),
+      data: {url: targetUrl},
+    });
+  })());
+});
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();

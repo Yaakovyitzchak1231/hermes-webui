@@ -122,8 +122,7 @@ def test_settings_expose_permission_and_test_controls():
     assert 'id="notificationPermissionButtonWrap"' in INDEX_HTML
     assert 'id="notificationPermissionButton"' in INDEX_HTML
     assert "requestNotificationPermission()" in INDEX_HTML
-    assert "sendBrowserNotification('Hermes test'" in INDEX_HTML
-    assert "{force:true}" in INDEX_HTML
+    assert "sendWebPushTestNotification()" in INDEX_HTML
     assert "function updateNotificationPermissionStatus" in PANELS_JS
     assert "const btn=$('notificationPermissionButton');" in PANELS_JS
     assert "const btnWrap=$('notificationPermissionButtonWrap');" in PANELS_JS
@@ -148,6 +147,7 @@ def test_granted_permission_branch_is_not_silent():
     ]
     assert "updateNotificationPermissionStatus()" in granted_branch
     assert "showToast(t('notifications_enabled_toast'),3000)" in granted_branch
+    assert "ensureWebPushSubscription()" in granted_branch
     assert "return Promise.resolve('granted');" in granted_branch
 
 

@@ -313,6 +313,10 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Files slide-over panel from right edge
 - Touch targets minimum 44px on all interactive elements
 - Full-height chat/composer on phones without bottom-nav spacing
+- Server-originated Web Push on Chromium/Android -- completed turns, errors,
+  approvals, and clarification requests can notify an installed PWA after its
+  window has been closed. Notification bodies stay generic to avoid exposing
+  conversation content on the lock screen.
 - Desktop layout completely unchanged
 
 ---
@@ -363,6 +367,8 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
+| `HERMES_WEBUI_VAPID_PRIVATE_KEY_FILE` | `$HERMES_WEBUI_STATE_DIR/webpush-vapid-private.pem` | Persistent private VAPID signing key for Android/Chromium Web Push. Generated with mode `0600` on first use when absent. Keep this file stable so existing device subscriptions remain valid. |
+| `HERMES_WEBUI_VAPID_SUBJECT` | `mailto:hermes-webui@localhost` | Contact URI placed in VAPID claims. Set this to a monitored `mailto:` address or the HTTPS URL of the deployment. |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the enforced and report-only CSP `connect-src` directives for trusted reverse-proxy, tunnel, or extension sidecar deployments |
 | `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |

@@ -8719,6 +8719,51 @@ function _showPwaNotification(title,body,options={}){
   }
   return Promise.resolve(direct());
 }
+let _webPushSubscriptionPromise=null;
+function _webPushApplicationServerKey(value){
+  const padding='='.repeat((4-(value.length%4))%4);
+  const base64=(value+padding).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(base64);
+  return Uint8Array.from(raw,c=>c.charCodeAt(0));
+}
+function ensureWebPushSubscription(){
+  if(_webPushSubscriptionPromise) return _webPushSubscriptionPromise;
+  _webPushSubscriptionPromise=(async()=>{
+    if(
+      !('serviceWorker' in navigator)
+      || !('PushManager' in window)
+      || !('Notification' in window)
+      || Notification.permission!=='granted'
+    ) return null;
+    const config=await api('/api/push/config');
+    if(!config||!config.supported||!config.public_key) return null;
+    const registration=await navigator.serviceWorker.ready;
+    let subscription=await registration.pushManager.getSubscription();
+    if(!subscription){
+      subscription=await registration.pushManager.subscribe({
+        userVisibleOnly:true,
+        applicationServerKey:_webPushApplicationServerKey(config.public_key),
+      });
+    }
+    await api('/api/push/subscribe',{
+      method:'POST',
+      body:JSON.stringify(subscription.toJSON()),
+    });
+    return subscription;
+  })().finally(()=>{_webPushSubscriptionPromise=null;});
+  return _webPushSubscriptionPromise;
+}
+async function sendWebPushTestNotification(){
+  try{
+    const permission=await requestNotificationPermission();
+    if(permission!=='granted') return;
+    const subscription=await ensureWebPushSubscription();
+    if(!subscription) throw new Error('Background notifications are unavailable in this browser.');
+    await api('/api/push/test',{method:'POST',body:JSON.stringify({})});
+  }catch(err){
+    if(typeof showToast==='function') showToast(String(err&&err.message||err),4000,'error');
+  }
+}
 function requestNotificationPermission(){
   if(!('Notification' in window)){
     if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');
@@ -8728,6 +8773,7 @@ function requestNotificationPermission(){
   if(Notification.permission==='granted'){
     if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     if(typeof showToast==='function') showToast(t('notifications_enabled_toast'),3000);
+    ensureWebPushSubscription().catch(err=>console.warn('Web Push subscription failed:',err));
     return Promise.resolve('granted');
   }
   if(Notification.permission==='denied'){
@@ -8738,6 +8784,7 @@ function requestNotificationPermission(){
   return Notification.requestPermission().then(p=>{
     if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
     if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
+    if(p==='granted') ensureWebPushSubscription().catch(err=>console.warn('Web Push subscription failed:',err));
     return p;
   });
 }

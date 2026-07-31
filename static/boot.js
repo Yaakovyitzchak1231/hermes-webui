@@ -3253,6 +3253,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
+    if(
+      window._notificationsEnabled
+      && typeof ensureWebPushSubscription==='function'
+      && typeof Notification!=='undefined'
+      && Notification.permission==='granted'
+    ){
+      ensureWebPushSubscription().catch(err=>console.warn('Web Push subscription failed:',err));
+    }
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=true;

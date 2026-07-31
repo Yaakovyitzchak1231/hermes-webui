@@ -11852,6 +11852,14 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
+  if(
+    window._notificationsEnabled
+    && typeof ensureWebPushSubscription==='function'
+    && typeof Notification!=='undefined'
+    && Notification.permission==='granted'
+  ){
+    ensureWebPushSubscription().catch(err=>console.warn('Web Push subscription failed:',err));
+  }
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;

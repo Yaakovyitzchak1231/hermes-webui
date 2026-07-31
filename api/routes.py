@@ -12430,6 +12430,15 @@ def handle_get(handler, parsed) -> bool:
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
 
+    if parsed.path == "/api/push/config":
+        from api.web_push import public_config
+
+        try:
+            return j(handler, public_config())
+        except Exception:
+            logger.exception("Failed to initialize Web Push")
+            return bad(handler, "Web Push is unavailable", status=503)
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
@@ -14006,6 +14015,42 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/push/subscribe":
+        from api.web_push import register_subscription
+
+        try:
+            return j(handler, register_subscription(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception:
+            logger.exception("Failed to register Web Push subscription")
+            return bad(handler, "Could not register Web Push", status=500)
+
+    if parsed.path == "/api/push/unsubscribe":
+        from api.web_push import remove_subscription
+
+        try:
+            return j(handler, remove_subscription(body.get("endpoint")))
+        except Exception:
+            logger.exception("Failed to remove Web Push subscription")
+            return bad(handler, "Could not remove Web Push subscription", status=500)
+
+    if parsed.path == "/api/push/test":
+        from api.web_push import send_test_notification
+
+        try:
+            result = send_test_notification()
+            if not result.get("ok"):
+                return bad(
+                    handler,
+                    "No Web Push subscription is registered",
+                    status=409,
+                )
+            return j(handler, result)
+        except Exception:
+            logger.exception("Failed to send Web Push test")
+            return bad(handler, "Could not send Web Push test", status=500)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)

@@ -8011,6 +8011,33 @@ def _run_agent_streaming(
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")
+        if event in {"done", "apperror", "approval", "clarify"}:
+            try:
+                from api.web_push import notify_stream_event
+
+                event_data = data if isinstance(data, dict) else {}
+                event_session = event_data.get("session")
+                notification_session_id = (
+                    event_data.get("session_id")
+                    or (
+                        event_session.get("session_id")
+                        if isinstance(event_session, dict)
+                        else None
+                    )
+                    or session_id
+                )
+                notify_stream_event(
+                    event,
+                    event_data,
+                    notification_session_id,
+                    ephemeral=ephemeral,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch Web Push event %s for stream %s",
+                    event,
+                    stream_id,
+                )
 
     # #5940: capture a terminal (non-retryable) provider error the Agent emits via
     # its lifecycle status_callback. The Agent aborts a non-retryable API error
