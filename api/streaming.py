@@ -4466,6 +4466,12 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
             put_event('title', {'session_id': session_id, 'title': effective_title})
+            # Sync the generated title to state.db so `hermes sessions list` shows it.
+            try:
+                from api.state_sync import sync_session_title
+                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+            except Exception:
+                logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
@@ -4538,6 +4544,12 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             s.save(touch_updated_at=False)
         _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
         put_event('title', {'session_id': session_id, 'title': effective_title})
+        # Sync the refreshed title to state.db so `hermes sessions list` stays current.
+        try:
+            from api.state_sync import sync_session_title
+            sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+        except Exception:
+            logger.debug("Failed to sync refreshed title to state.db for %s", session_id)
         logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
     except Exception:
         logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
