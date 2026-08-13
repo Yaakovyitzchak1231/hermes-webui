@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import copy
+import inspect
 from pathlib import Path
 from typing import Optional
 
@@ -305,6 +306,19 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
         dynamic_schema_overrides=entry.dynamic_schema_overrides,
     )
     _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+
+
+def _supports_kwarg(func, kwarg_name: str) -> bool:
+    """Return True if callable `func` accepts `kwarg_name` (explicitly or via **kwargs)."""
+    try:
+        sig = inspect.signature(func)
+        for param in sig.parameters.values():
+            if param.kind == param.VAR_KEYWORD or param.name == kwarg_name:
+                return True
+        return False
+    except Exception:
+        return True
+
 
 
 _PERSISTENT_MEMORY_FILES = (
@@ -9923,8 +9937,9 @@ def _run_agent_streaming(
                 ),
                 task_id=session_id,
                 persist_user_message=msg_text,
-                persist_user_timestamp=getattr(s, 'pending_started_at', None),
             )
+            if _supports_kwarg(agent.run_conversation, 'persist_user_timestamp'):
+                _run_conversation_kwargs['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
             # run_conversation() predates the moa_config kwarg.
@@ -10426,8 +10441,9 @@ def _run_agent_streaming(
                                     ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
-                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
                                 )
+                                if _supports_kwarg(agent.run_conversation, 'persist_user_timestamp'):
+                                    _heal_kwargs['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
@@ -11666,8 +11682,9 @@ def _run_agent_streaming(
                             ),
                             task_id=session_id,
                             persist_user_message=msg_text,
-                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
                         )
+                        if _supports_kwarg(_heal_agent.run_conversation, 'persist_user_timestamp'):
+                            _heal_kwargs2['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
