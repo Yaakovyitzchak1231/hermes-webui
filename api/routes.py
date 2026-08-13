@@ -18544,12 +18544,15 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     return _bytes_etag(data), data, actual_size
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None):
     """Serve a file with correct MIME/disposition and optional byte-range support.
 
     Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
     the request is short-circuited with 304 so revalidating clients (e.g.
     `no-cache` responses) do not re-download unchanged files.
+
+    ``download_name`` overrides the Content-Disposition filename (used when
+    serving an immutable media snapshot whose on-disk name is a content digest).
     """
     fd = None
     try:
@@ -18635,7 +18638,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         if byte_range:
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
-        handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+        handler.send_header("Content-Disposition", _content_disposition_value(disposition, download_name or target.name))
         if csp:
             # Sandboxed inline HTML must remain frameable for workspace previews;
             # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
@@ -19381,6 +19384,201 @@ def _path_is_within_root(child: Path, root: Path) -> bool:
         return False
 
 
+def _media_deny_reason(target: Path) -> str | None:
+    """Return a reason string when ``target`` must be hard-denied, else None.
+
+    The ``/api/media`` #3234 state/profile deny model, extracted so the
+    snapshot CAPTURE side (api/media_snapshots.media_capture_allowed) shares
+    the EXACT same predicate — anything the serve path refuses is never
+    captured in the first place (#6979 Round 2 MUST-FIX 1 deny parity).
+
+    Model: the ACTIVE WORKSPACE is a legitimate-media carve-out — the user is
+    entitled to their own workspace files (that is also how the workspace file
+    browser reaches them), even when a workspace happens to live under a
+    Hermes root. The deny rules target Hermes's OWN internal state, which lives
+    OUTSIDE any workspace. So: if the target is inside the active workspace, it
+    is never denied here; otherwise we deny known secret/config basenames and
+    the internal state subdirectories across every Hermes root the allowlist
+    accepts (active-profile HERMES_HOME, base ~/.hermes, the api.profiles
+    default home, and STATE_DIR — which also defends sibling profiles).
+    """
+    import os as _os
+
+    _HOME = Path(_os.path.expanduser("~"))
+    _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
+
+    _DENY_FILENAMES = {
+        "settings.json", "state.db", "state.db-wal", "state.db-shm",
+        "auth.json", "auth.lock", "config.yaml", "config.yml", ".env",
+        ".signing_key", ".pbkdf2_key", ".sessions.json",
+        "google_token.json", "google_client_secret.json",
+        "gateway_state.json", "channel_directory.json", "jobs.json",
+        "passkeys.json", ".passkey_challenges.json", ".login_attempts.json",
+    }
+    # Internal state subdirs that are sensitive in their entirety. NOTE:
+    # `profiles` is intentionally NOT here — it is a container of profile roots,
+    # each of which has its own legitimate workspace/. We instead enumerate each
+    # named-profile root below and deny ITS state subdirs, so a sibling profile's
+    # secrets are blocked without 403-ing a named-profile workspace. (#3234.)
+    _DENY_SUBDIRS = (
+        "sessions", "memories", "cron", "logs",
+        "checkpoints", "backups",
+        # Content-addressed media snapshots (api/media_snapshots.py) are an
+        # internal store: digest bytes are only reachable through the validated
+        # `snap=` parameter, never as a bare `path=` request. (#media-snapshots)
+        "media_snapshots",
+    )
+    _state_dir = None
+    try:
+        from api.config import STATE_DIR as _STATE_DIR
+        _state_dir = Path(_STATE_DIR).resolve()
+    except Exception:
+        _state_dir = None
+    _base_hermes_home = None
+    try:
+        from api.profiles import _DEFAULT_HERMES_HOME as _BASE_HH
+        _base_hermes_home = Path(_BASE_HH).resolve()
+    except Exception:
+        _base_hermes_home = None
+    _hermes_roots = []
+    for _r in (
+        _HERMES_HOME.resolve(),
+        (_HOME / ".hermes").resolve(),
+        _base_hermes_home,
+        _state_dir,
+    ):
+        if _r is not None and _r not in _hermes_roots:
+            _hermes_roots.append(_r)
+    # Enumerate named-profile roots (<root>/profiles/<name>) and treat each as a
+    # Hermes root in its own right, so a sibling/other profile's sensitive subdirs
+    # + secret files are denied — WITHOUT denying the whole `profiles` container
+    # (which would block a legit named-profile workspace at
+    # <root>/profiles/<name>/workspace/). (Codex review #3234.)
+    _profile_roots = []
+    for _root in list(_hermes_roots):
+        _profiles_dir = (_root / "profiles")
+        try:
+            if _profiles_dir.is_dir():
+                for _pchild in _profiles_dir.iterdir():
+                    if _pchild.is_dir():
+                        _pr = _pchild.resolve()
+                        if _pr not in _hermes_roots and _pr not in _profile_roots:
+                            _profile_roots.append(_pr)
+        except OSError:
+            pass
+    _hermes_roots.extend(_profile_roots)
+
+    # Case-insensitive path helpers so STATE.DB / Sessions/ casing variants
+    # cannot bypass the deny on macOS/Windows filesystems (Codex review #3234).
+    def _norm(p):
+        return os.path.normcase(str(Path(p).resolve())).casefold()
+    def _within_ci(child, root):
+        try:
+            c, r = _norm(child), _norm(root)
+            return os.path.commonpath([c, r]) == r
+        except (ValueError, OSError):
+            return False
+    def _equal_ci(a, b):
+        try:
+            return _norm(a) == _norm(b)
+        except (ValueError, OSError):
+            return False
+
+    # State-subdir deny set: each DENY_SUBDIR directly under any Hermes root
+    # (which includes STATE_DIR — so STATE_DIR/sessions, STATE_DIR/memories,
+    # etc. are covered). These ALWAYS apply — even to a file under the active
+    # workspace — so a workspace pointed at (or overlapping) a state dir cannot
+    # expose sessions/memories/profiles/etc. We do NOT deny STATE_DIR itself
+    # wholesale: the default workspace lives at STATE_DIR/workspace, and that is
+    # legitimate user media — direct sensitive files there are still caught by
+    # the filename denies below. (Codex review #3234.)
+    _deny_dirs = []
+    for _root in _hermes_roots:
+        for _sub in _DENY_SUBDIRS:
+            _deny_dirs.append((_root / _sub).resolve())
+        # Per-profile WebUI state lives at <root>/webui_state (api/workspace.py),
+        # so its state subdirs (<root>/webui_state/sessions, etc.) must be denied
+        # too — they are NOT direct children of <root>. (Codex review #3234.)
+        _ws_state = (_root / "webui_state")
+        for _sub in _DENY_SUBDIRS:
+            _deny_dirs.append((_ws_state / _sub).resolve())
+    # The configured media-snapshot store root itself: blobs are internal and
+    # only reachable through the validated `snap=` parameter on an authorized
+    # path, so a bare `path=` request at or below the store is rejected
+    # REGARDLESS of the store's configured name/location
+    # (HERMES_WEBUI_MEDIA_SNAPSHOT_DIR may point anywhere, e.g. /tmp/custom-name;
+    # the literal "media_snapshots" entry above only covers the default layout).
+    # (#6979 Round 2 MUST-FIX 2.)
+    try:
+        from api.media_snapshots import get_snapshot_dir
+        _snap_store = get_snapshot_dir().resolve()
+    except Exception:
+        _snap_store = None
+    if _snap_store is not None and _within_ci(target, _snap_store):
+        return "media snapshot store is internal"
+    _deny_names_ci = {n.casefold() for n in _DENY_FILENAMES}
+
+    # Active-workspace carve-out: a file inside a genuine PROJECT workspace is
+    # the user's own content, so the secret/config FILENAME denies are relaxed
+    # for it. The carve-out is DISABLED when the workspace is a broad/internal
+    # location ($HOME, a Hermes root itself, an ANCESTOR of a Hermes root, a
+    # */profiles dir, a named-profile root, or a state subdir) — honoring those
+    # would re-open the disclosure. A workspace that is a proper DESCENDANT of a
+    # Hermes root (e.g. STATE_DIR/workspace) is still a legit project workspace
+    # and keeps the carve-out. The dir-based denies above are NOT relaxed.
+    _active_workspace = None
+    try:
+        from api.workspace import get_last_workspace
+        _aw = Path(get_last_workspace()).resolve()
+        if _aw.is_dir():
+            _active_workspace = _aw
+    except Exception:
+        _active_workspace = None
+
+    def _workspace_is_safe_carveout(ws):
+        if ws is None:
+            return False
+        if _equal_ci(ws, _HOME):
+            return False
+        for _root in _hermes_roots:
+            # ws IS a root, or ws is an ANCESTOR of a root → unsafe. (A proper
+            # descendant of a root is fine — that's a normal project workspace.)
+            if _equal_ci(ws, _root) or _within_ci(_root, ws):
+                return False
+        if ws.name == "profiles" or ws.parent.name == "profiles":
+            return False
+        if ws.name in _DENY_SUBDIRS:
+            return False
+        return True
+
+    _in_active_workspace = (
+        _active_workspace is not None
+        and _workspace_is_safe_carveout(_active_workspace)
+        and _within_ci(target, _active_workspace)
+    )
+
+    # Dir-based denies always fire (even inside the active workspace).
+    if any(_within_ci(target, d) for d in _deny_dirs):
+        return "denied state subdir"
+    # Filename-based denies fire for files under a Hermes root, UNLESS the file
+    # is inside a genuine project workspace (carve-out).
+    if not _in_active_workspace:
+        _under_hermes_root = any(_within_ci(target, _root) for _root in _hermes_roots)
+        _name_cf = target.name.casefold()
+        # Exact secret/state basenames, plus atomic-write temp files for those
+        # (api/auth.py and api/passkeys.py write via a `tmp*.<name>.tmp` / `tmp*.tmp`
+        # sidecar then rename) — deny those suffixes too so a momentary temp file
+        # cannot be fetched. (Codex review #3234.)
+        _deny_tmp_suffixes = (".sessions.tmp", ".login_attempts.tmp",
+                              ".passkeys.tmp", ".passkey_challenges.tmp")
+        if _under_hermes_root and (
+            _name_cf in _deny_names_ci
+            or _name_cf.endswith(_deny_tmp_suffixes)
+        ):
+            return "denied state filename"
+    return None
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -19482,175 +19680,21 @@ def _handle_media(handler, parsed):
     # covers every entry path (bare file:// URLs, markdown anchors, MEDIA:
     # tokens, and session-token grants).
     #
-    # Model: the ACTIVE WORKSPACE is a legitimate-media carve-out — the user is
-    # entitled to their own workspace files (that is also how the workspace file
-    # browser reaches them), even when a workspace happens to live under a
-    # Hermes root. The deny rules target Hermes's OWN internal state, which lives
-    # OUTSIDE any workspace. So: if the target is inside the active workspace, it
-    # is never denied here; otherwise we deny known secret/config basenames and
-    # the internal state subdirectories across every Hermes root the allowlist
-    # accepts (active-profile HERMES_HOME, base ~/.hermes, the api.profiles
-    # default home, and STATE_DIR — which also defends sibling profiles).
-    _DENY_FILENAMES = {
-        "settings.json", "state.db", "state.db-wal", "state.db-shm",
-        "auth.json", "auth.lock", "config.yaml", "config.yml", ".env",
-        ".signing_key", ".pbkdf2_key", ".sessions.json",
-        "google_token.json", "google_client_secret.json",
-        "gateway_state.json", "channel_directory.json", "jobs.json",
-        "passkeys.json", ".passkey_challenges.json", ".login_attempts.json",
-    }
-    # Internal state subdirs that are sensitive in their entirety. NOTE:
-    # `profiles` is intentionally NOT here — it is a container of profile roots,
-    # each of which has its own legitimate workspace/. We instead enumerate each
-    # named-profile root below and deny ITS state subdirs, so a sibling profile's
-    # secrets are blocked without 403-ing a named-profile workspace. (#3234.)
-    _DENY_SUBDIRS = (
-        "sessions", "memories", "cron", "logs",
-        "checkpoints", "backups",
-    )
-    _state_dir = None
-    try:
-        from api.config import STATE_DIR as _STATE_DIR
-        _state_dir = Path(_STATE_DIR).resolve()
-    except Exception:
-        _state_dir = None
-    _base_hermes_home = None
-    try:
-        from api.profiles import _DEFAULT_HERMES_HOME as _BASE_HH
-        _base_hermes_home = Path(_BASE_HH).resolve()
-    except Exception:
-        _base_hermes_home = None
-    _hermes_roots = []
-    for _r in (
-        _HERMES_HOME.resolve(),
-        (_HOME / ".hermes").resolve(),
-        _base_hermes_home,
-        _state_dir,
-    ):
-        if _r is not None and _r not in _hermes_roots:
-            _hermes_roots.append(_r)
-    # Enumerate named-profile roots (<root>/profiles/<name>) and treat each as a
-    # Hermes root in its own right, so a sibling/other profile's sensitive subdirs
-    # + secret files are denied — WITHOUT denying the whole `profiles` container
-    # (which would block a legit named-profile workspace at
-    # <root>/profiles/<name>/workspace/). (Codex review #3234.)
-    _profile_roots = []
-    for _root in list(_hermes_roots):
-        _profiles_dir = (_root / "profiles")
-        try:
-            if _profiles_dir.is_dir():
-                for _pchild in _profiles_dir.iterdir():
-                    if _pchild.is_dir():
-                        _pr = _pchild.resolve()
-                        if _pr not in _hermes_roots and _pr not in _profile_roots:
-                            _profile_roots.append(_pr)
-        except OSError:
-            pass
-    _hermes_roots.extend(_profile_roots)
-
-    # Case-insensitive path helpers so STATE.DB / Sessions/ casing variants
-    # cannot bypass the deny on macOS/Windows filesystems (Codex review #3234).
-    def _norm(p):
-        return os.path.normcase(str(Path(p).resolve())).casefold()
-    def _within_ci(child, root):
-        try:
-            c, r = _norm(child), _norm(root)
-            return os.path.commonpath([c, r]) == r
-        except (ValueError, OSError):
-            return False
-    def _equal_ci(a, b):
-        try:
-            return _norm(a) == _norm(b)
-        except (ValueError, OSError):
-            return False
-
-    # State-subdir deny set: each DENY_SUBDIR directly under any Hermes root
-    # (which includes STATE_DIR — so STATE_DIR/sessions, STATE_DIR/memories,
-    # etc. are covered). These ALWAYS apply — even to a file under the active
-    # workspace — so a workspace pointed at (or overlapping) a state dir cannot
-    # expose sessions/memories/profiles/etc. We do NOT deny STATE_DIR itself
-    # wholesale: the default workspace lives at STATE_DIR/workspace, and that is
-    # legitimate user media — direct sensitive files there are still caught by
-    # the filename denies below. (Codex review #3234.)
-    _deny_dirs = []
-    for _root in _hermes_roots:
-        for _sub in _DENY_SUBDIRS:
-            _deny_dirs.append((_root / _sub).resolve())
-        # Per-profile WebUI state lives at <root>/webui_state (api/workspace.py),
-        # so its state subdirs (<root>/webui_state/sessions, etc.) must be denied
-        # too — they are NOT direct children of <root>. (Codex review #3234.)
-        _ws_state = (_root / "webui_state")
-        for _sub in _DENY_SUBDIRS:
-            _deny_dirs.append((_ws_state / _sub).resolve())
-    _deny_names_ci = {n.casefold() for n in _DENY_FILENAMES}
-
-    # Active-workspace carve-out: a file inside a genuine PROJECT workspace is
-    # the user's own content, so the secret/config FILENAME denies are relaxed
-    # for it. The carve-out is DISABLED when the workspace is a broad/internal
-    # location ($HOME, a Hermes root itself, an ANCESTOR of a Hermes root, a
-    # */profiles dir, a named-profile root, or a state subdir) — honoring those
-    # would re-open the disclosure. A workspace that is a proper DESCENDANT of a
-    # Hermes root (e.g. STATE_DIR/workspace) is still a legit project workspace
-    # and keeps the carve-out. The dir-based denies above are NOT relaxed.
-    _active_workspace = None
-    try:
-        from api.workspace import get_last_workspace
-        _aw = Path(get_last_workspace()).resolve()
-        if _aw.is_dir():
-            _active_workspace = _aw
-    except Exception:
-        _active_workspace = None
-
-    def _workspace_is_safe_carveout(ws):
-        if ws is None:
-            return False
-        if _equal_ci(ws, _HOME):
-            return False
-        for _root in _hermes_roots:
-            # ws IS a root, or ws is an ANCESTOR of a root → unsafe. (A proper
-            # descendant of a root is fine — that's a normal project workspace.)
-            if _equal_ci(ws, _root) or _within_ci(_root, ws):
-                return False
-        if ws.name == "profiles" or ws.parent.name == "profiles":
-            return False
-        if ws.name in _DENY_SUBDIRS:
-            return False
-        return True
-
-    _in_active_workspace = (
-        _active_workspace is not None
-        and _workspace_is_safe_carveout(_active_workspace)
-        and _within_ci(target, _active_workspace)
-    )
-
-    # Dir-based denies always fire (even inside the active workspace).
-    if any(_within_ci(target, d) for d in _deny_dirs):
+    # The predicate is SHARED with snapshot capture
+    # (api/media_snapshots.media_capture_allowed) so capture and serve can
+    # never diverge on what is denied — anything denied here is never
+    # snapshotted in the first place. (#6979 Round 2 MUST-FIX 1.)
+    deny_reason = _media_deny_reason(target)
+    if deny_reason:
         return bad(handler, "Path not in allowed location", 403)
-    # Filename-based denies fire for files under a Hermes root, UNLESS the file
-    # is inside a genuine project workspace (carve-out).
-    if not _in_active_workspace:
-        _under_hermes_root = any(_within_ci(target, _root) for _root in _hermes_roots)
-        _name_cf = target.name.casefold()
-        # Exact secret/state basenames, plus atomic-write temp files for those
-        # (api/auth.py and api/passkeys.py write via a `tmp*.<name>.tmp` / `tmp*.tmp`
-        # sidecar then rename) — deny those suffixes too so a momentary temp file
-        # cannot be fetched. (Codex review #3234.)
-        _deny_tmp_suffixes = (".sessions.tmp", ".login_attempts.tmp",
-                              ".passkeys.tmp", ".passkey_challenges.tmp")
-        if _under_hermes_root and (
-            _name_cf in _deny_names_ci
-            or _name_cf.endswith(_deny_tmp_suffixes)
-        ):
-            return bad(handler, "Path not in allowed location", 403)
     # ── end #3234 deny ───────────────────────────────────────────────────────
 
     if not within_allowed and not session_media_allowed:
         return bad(handler, "Path not in allowed location", 403)
 
-    if not target.exists() or not target.is_file():
-        return j(handler, {"error": "not found"}, status=404)
-
-    # Determine MIME type
+    # Determine MIME type from the requested path's extension. Computed BEFORE
+    # the existence check because the requested file may have been overwritten
+    # or deleted while its message-level snapshot still exists below.
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
@@ -19669,6 +19713,58 @@ def _handle_media(handler, parsed):
     ) else "attachment"
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
+
+    # ── Message-level snapshot serving (?snap=<sha256>) ─────────────────────
+    # Historical chat previews carry a content-addressed snapshot digest of the
+    # file as it existed when the message settled (see api/media_snapshots.py).
+    # Serving the frozen bytes instead of the live file means an in-place
+    # overwrite (same filename) no longer rewrites old previews — the user can
+    # still compare old vs new. The allow/deny checks above still gate the
+    # request: `snap` only selects WHICH bytes to serve for an already-
+    # authorized path; it never grants access to a path that would be denied
+    # without it. A missing/evicted snapshot falls back to the live file.
+    snap_digest = qs.get("snap", [""])[0].strip().lower()
+    snapshot_file = None
+    snap_dir = None
+    if snap_digest:
+        from api.media_snapshots import (
+            get_snapshot_dir,
+            is_valid_digest,
+            snapshot_path_for_digest,
+            snapshot_servable_for_path,
+        )
+
+        snap_dir = get_snapshot_dir().resolve()
+        if is_valid_digest(snap_digest):
+            snapshot_file = snapshot_path_for_digest(snap_digest)
+            # Server-owned source-path binding (#6979 Round 2 MUST-FIX 1): a
+            # digest may only be served back for the EXACT canonical path it
+            # was captured from. Replaying a digest through a different
+            # (allowed) path must not leak the stored bytes — treat it as an
+            # invalid snapshot and fall back to the live file (or 404 when the
+            # live file is absent).
+            if snapshot_file is not None and not snapshot_servable_for_path(snap_digest, target):
+                snapshot_file = None
+    if snapshot_file is not None:
+        # Content-addressed and immutable: the digest IS the SHA-256 of the
+        # exact bytes, so the browser may cache forever and never revalidate.
+        # The blob is opened ANCHORED inside the store root (no-follow), and
+        # the store root itself is deny-listed from bare path= fetches above
+        # (#6979 Round 2 MUST-FIX 2).
+        return _serve_file_bytes(
+            handler,
+            snapshot_file,
+            mime,
+            disposition,
+            "private, max-age=31536000, immutable",
+            csp=csp,
+            download_name=target.name,
+            anchor_root=snap_dir,
+        )
+
+    if not target.exists() or not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
